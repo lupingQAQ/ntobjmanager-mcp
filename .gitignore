@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+output/
+client_*.cs
+*.etl
+symbols/
+rpcmcp_symbols/
+*.log
