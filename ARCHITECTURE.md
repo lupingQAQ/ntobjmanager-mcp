@@ -28,6 +28,13 @@ NtObjectManager / NtCoreLib
   ├─ Get-RpcClient + Connect-RpcClient   内存编译客户端 + 连接（有状态核心）
   ├─ Format-RpcClient                C# 客户端源码导出
   └─ ALPC / 计划任务 / SD 辅助 cmdlet
+
+vm_listener.ps1 ──────────── VM 侧常驻 HTTP 桥（rpc_vm_exec, :8765）
+  │  单 runspace 常驻: 跨请求变量 / 已连 RPC 客户端存活（≠ 每调用新 shell）
+  │  协议: POST {"ps":…} → {"output":…}; __ERROR__ / __TIMEOUT__ 前缀
+  │  vmrun 回退: 无状态（每调用新 guest shell），响应标注 stateful:false
+  ▼
+VM 内 NtObjectManager
 ```
 
 ## 有状态模型
@@ -70,6 +77,7 @@ args_json ──ConvertFrom-Json──▶ 逐元素判定:
 | store_as / `__var__` | context handle 序列化即失真；对象直传是混淆链唯一可行通道（R5） |
 | fuzz 默认 dry-run | CVE-2025-26651 式"默认值打崩 LSM"在本机重演风险；执行需显式确认 |
 | 不提供 raw shell 工具 | 攻击面收敛：每个工具只暴露白名单化的 PS 片段 |
+| VM 桥单 runspace 常驻（R13）| 每请求新 shell 会把刚连上的 RPC 客户端丢掉；与 host 引擎同构才能跨调用链式调用 |
 | ETW 失败必须显性报错 | 非管理员 logman 失败曾静默返回 ok 形状 0 事件（R6） |
 | 扫描器 verdict 措辞降级 | "多分组"≠多类型（XactSrv 单一打印机句柄仍报 HIGH 的误报事故，R9） |
 | 每调用写审计日志 | agent 持有 RCE 级能力，可观测性是底线 |

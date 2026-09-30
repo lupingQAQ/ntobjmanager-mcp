@@ -7,6 +7,9 @@
 - **R1** 常驻单进程 + base64/`__MCP_DONE__` 标记协议（跨调用状态的唯一载体）
 - **R2** `$RPCMCP` 状态哈希（Servers/Clients/vars）+ 解析缓存（上限 150，FIFO 淘汰）
 - **R11** 每调用审计日志（`@tool` 装饰器 → `output/mcp_audit.log`）
+- **R13** VM 桥（`vm_listener.ps1`）由"每请求新 `powershell.exe`"改为单 runspace 常驻：
+  `rpc_vm_exec` 的变量 / 已连 RPC 客户端跨调用存活；`vmrun` 回退显式标注 `stateful:false`
+  （修复：每调用新 shell 会丢掉刚连上的 RPC 客户端）
 
 ## 调用与编组（两个 PS 5.1 实锤坑）
 - **R3** 反射调用 + `IsSpecialName` 过滤（`rpc_methods` 曾列出 `get_New` 属性访问器）
