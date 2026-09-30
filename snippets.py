@@ -210,12 +210,12 @@ try {
 # rpc_running_servers: enumerate RPC servers in a live process or service.
 # --------------------------------------------------------------------------
 RUNNING_SERVERS = r"""
-$pid = @@PID@@
+$targetPid = @@PID@@
 $svc = @@SVCNAME@@
 try {
   $servers = @()
   $tag = ''
-  if ($pid) { $servers = @(Get-RpcServer -ProcessId $pid); $tag = 'pid' + $pid }
+  if ($targetPid) { $servers = @(Get-RpcServer -ProcessId $targetPid); $tag = 'pid' + $targetPid }
   else { $servers = @(Get-RpcServer -ServiceName $svc); $tag = 'svc' + $svc }
   $out = @(); $i = 0
   foreach ($s in $servers) {
@@ -225,7 +225,7 @@ try {
     $i++
   }
   $eps = @()
-  if ($pid) { try { $eps = @(Get-RpcEndpoint -ProcessId $pid) } catch { } }
+  if ($targetPid) { try { $eps = @(Get-RpcEndpoint -ProcessId $targetPid) } catch { } }
   $epJson = @(); foreach ($e in $eps) { $epJson += ,(__McpEpJson $e) }
   [PSCustomObject]@{ count = $out.Count; servers = $out; process_endpoints = $epJson } | ConvertTo-Json -Depth 5 -Compress
 } catch {
