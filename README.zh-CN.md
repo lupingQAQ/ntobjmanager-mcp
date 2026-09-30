@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/windows-server/administration/windows-commands/powershell)
-[![MCP](https://img.shields.io/badge/MCP-22%20tools-purple)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/MCP-24%20tools-purple)](https://modelcontextprotocol.io)
 
 🌐 **[English](README.md)**
 
@@ -17,18 +17,21 @@
 底层封装 James Forshaw 的
 [NtObjectManager](https://www.powershellgallery.com/packages/NtObjectManager)（NtCoreLib）。
 
-通用 PowerShell MCP 做不到、而本项目存在的两个理由：
+通用 PowerShell MCP 做不到、而本项目存在的三个理由：
 
 1. **有状态 RPC 连接** —— 常驻 PowerShell 引擎让解析出的 `RpcServer` 对象与
    *已连接的 RPC 客户端*跨工具调用存活：`rpc_connect` 一次，`rpc_call` 多次
    （认证握手、context handle 链、会话变量全保留）。
 2. **CVE 方法论固化为固定工具** —— 2024–2026 公开研究的标准挖掘工作流一键调用，
-   不靠提示词工程：
+   不靠提示词工程。
+3. **lab VM 内有状态执行** —— 把同一“单引擎”原则用到 guest：`rpc_vm_exec` 通过单个常驻
+   guest runspace 让变量与已连 RPC 客户端跨调用存活，绝不每调用新开 shell
+   （vmrun 回退标注 `stateful: false`）。
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │  AI Agent（Claude Code / OpenCode / 任意 MCP 客户端）               │
-│      │  MCP（stdio，22 个工具）                                    │
+│      │  MCP（stdio，24 个工具）                                    │
 │      ▼                                                             │
 │  server.py ── snippets.py（PS 模板，@@TOKEN@@ 渲染 + ps_str 转义）  │
 │      │                                                             │
@@ -40,7 +43,7 @@
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-## 工具矩阵（22 个）
+## 工具矩阵（24 个）
 
 ### 核心有状态管线
 
@@ -55,6 +58,13 @@
 | `rpc_methods(session)` | 方法签名，**带 opnum 映射** |
 | `rpc_call(session, method, args_json, store_as?)` | 反射调用；`{"__var__"}` 直传已存对象 |
 | `rpc_disconnect(session)` | 断开会话 |
+
+### VM 实验桥（有状态 guest 执行）
+
+| 工具 | 用途 |
+|------|------|
+| `rpc_vm_exec(ps, timeout?, vm?)` | 在实验 VM 内运行 PowerShell；跨调用保持状态（常驻 guest runspace） |
+| `rpc_vm_start_listener(vm?)` | 部署/启动常驻 guest HTTP 引擎（`vm_listener.ps1`） |
 
 ### 2024–2026 CVE 方法论工具
 
@@ -141,10 +151,11 @@ claude mcp add ntobjectmanager-rpc -- python C:\path\to\ntobjmanager-mcp\server.
 
 ```
 ntobjmanager-mcp/
-├── server.py            # 22 个 MCP 工具 + 审计日志装饰器
+├── server.py            # 24 个 MCP 工具 + 审计日志装饰器
 ├── snippets.py          # PowerShell 模板（@@TOKEN@@ 渲染 + ps_str 转义）
 ├── ps_engine.py         # 常驻引擎：base64 命令 + __MCP_DONE__ 标记，超时处理
 ├── wrapper.ps1          # PS 侧循环（状态存于 $RPCMCP）
+├── vm_listener.ps1      # 常驻 guest HTTP 桥（有状态 VM 执行）
 ├── tests/
 │   ├── smoke_test.py    # 17 项 —— stdio 端到端
 │   ├── var_test.py      # 10 项 —— store_as/__var__ 对象直传
@@ -154,7 +165,7 @@ ntobjmanager-mcp/
 │   ├── hunt2_wide.py    # 51 模块广撒网
 │   └── hunt2_probe.py   # 安全运行时探针（暴露面 / 任务交集）
 ├── ARCHITECTURE.md      # 引擎协议 + 设计裁决
-├── CHANGELOG.md         # 裁决史（R1–R12）
+├── CHANGELOG.md         # 裁决史（R1–R13）
 ├── SECURITY.md          # 授权使用 + MSRC 披露
 ├── CONTRIBUTING.md      # 开发不变式
 └── LICENSE              # MIT
@@ -165,6 +176,7 @@ ntobjmanager-mcp/
 | 主张 | 状态 |
 |------|------|
 | 客户端跨工具调用有状态 | 是 —— 常驻引擎 + `$RPCMCP` |
+| lab VM 内有状态执行 | 是 —— 单个常驻 guest runspace（`rpc_vm_exec`）；vmrun 回退无状态 |
 | context handle 链式传递（producer→consumer） | 是 —— `store_as` / `__var__` 原始对象直传 |
 | 自动确认类型混淆 | **否** —— NDR 无法证明句柄*类型*差异；需逆向验证（见 XactSrv 案例） |
 | 完整流氓 RPC 托管 | **否** —— NtObjectManager 2.0.1 无 server builder；`rpc_alpc_squat` 只覆盖竞态捕获 |
@@ -175,7 +187,7 @@ ntobjmanager-mcp/
 ## 📖 文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) —— 引擎协议、状态模型、设计裁决
-- [CHANGELOG.md](CHANGELOG.md) —— R1–R12 裁决史（含两个 PS 5.1 编组 bug）
+- [CHANGELOG.md](CHANGELOG.md) —— R1–R13 裁决史（含两个 PS 5.1 编组 bug）
 - [SECURITY.md](SECURITY.md) —— 授权使用、VM 隔离、MSRC 披露
 - [CONTRIBUTING.md](CONTRIBUTING.md) —— 开发不变式与测试要求
 

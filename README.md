@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/windows-server/administration/windows-commands/powershell)
-[![MCP](https://img.shields.io/badge/MCP-22%20tools-purple)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/MCP-24%20tools-purple)](https://modelcontextprotocol.io)
 
 🌐 **[中文版](README.zh-CN.md)**
 
@@ -17,19 +17,23 @@ A Model Context Protocol server that gives an AI agent **live, stateful access t
 RPC attack-surface research**, built on James Forshaw's
 [NtObjectManager](https://www.powershellgallery.com/packages/NtObjectManager) (NtCoreLib).
 
-Two things a generic PowerShell MCP cannot do — and the reason this exists:
+Three things a generic PowerShell MCP cannot do — and the reason this exists:
 
 1. **Stateful RPC connections** — a persistent PowerShell engine keeps parsed
    `RpcServer` objects and *connected RPC clients* alive across tool calls:
    `rpc_connect` once, `rpc_call` many times (auth handshakes, context-handle
    chains, session variables survive).
 2. **CVE methodology as fixed tools** — the standard hunting workflows from
-   2024–2026 public research are one-click, not prompt-engineering:
+   2024–2026 public research are one-click, not prompt-engineering.
+3. **Stateful execution inside a lab VM** — the same one-engine principle applied
+   in the guest: `rpc_vm_exec` keeps variables and connected RPC clients alive
+   across calls through a single persistent guest runspace, never a fresh shell
+   per call (the vmrun fallback is reported as `stateful: false`).
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │  AI Agent (Claude Code / OpenCode / any MCP client)                │
-│      │  MCP (stdio, 22 tools)                                      │
+│      │  MCP (stdio, 24 tools)                                      │
 │      ▼                                                             │
 │  server.py ── snippets.py (PS templates, @@TOKEN@@ + ps_str escape)│
 │      │                                                             │
@@ -41,7 +45,7 @@ Two things a generic PowerShell MCP cannot do — and the reason this exists:
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-## Tool Matrix (22)
+## Tool Matrix (24)
 
 ### Core stateful pipeline
 
@@ -56,6 +60,13 @@ Two things a generic PowerShell MCP cannot do — and the reason this exists:
 | `rpc_methods(session)` | Signatures **with opnum mapping** |
 | `rpc_call(session, method, args_json, store_as?)` | Reflection invoke; `{"__var__"}` passes stored objects |
 | `rpc_disconnect(session)` | Drop session |
+
+### VM lab bridge (stateful guest execution)
+
+| Tool | Purpose |
+|------|---------|
+| `rpc_vm_exec(ps, timeout?, vm?)` | Run PowerShell inside a lab VM; state survives across calls (persistent guest runspace) |
+| `rpc_vm_start_listener(vm?)` | Deploy/start the persistent guest HTTP engine (`vm_listener.ps1`) |
 
 ### 2024–2026 CVE methodology tools
 
@@ -143,10 +154,11 @@ producer→consumer handle-confusion testing needs.
 
 ```
 ntobjmanager-mcp/
-├── server.py            # 22 MCP tools + audit logging wrapper
+├── server.py            # 24 MCP tools + audit logging wrapper
 ├── snippets.py          # PowerShell templates (@@TOKEN@@ render + ps_str escaping)
 ├── ps_engine.py         # Persistent engine: base64 cmds + __MCP_DONE__ markers, timeouts
 ├── wrapper.ps1          # PS-side loop (state lives in $RPCMCP)
+├── vm_listener.ps1      # Persistent guest HTTP bridge (stateful VM exec)
 ├── tests/
 │   ├── smoke_test.py    # 17 checks — live stdio end-to-end
 │   ├── var_test.py      # 10 checks — store_as/__var__ object passing
@@ -156,7 +168,7 @@ ntobjmanager-mcp/
 │   ├── hunt2_wide.py    # 51-module sweep
 │   └── hunt2_probe.py   # Safe runtime probes (exposure / task cross-ref)
 ├── ARCHITECTURE.md      # Engine protocol + design decisions
-├── CHANGELOG.md         # Decision history (R1–R12)
+├── CHANGELOG.md         # Decision history (R1–R13)
 ├── SECURITY.md          # Authorized-use policy + MSRC disclosure
 ├── CONTRIBUTING.md      # Development invariants
 └── LICENSE              # MIT
@@ -167,6 +179,7 @@ ntobjmanager-mcp/
 | Claim | Status |
 |-------|--------|
 | Stateful clients across tool calls | Yes — persistent engine + `$RPCMCP` |
+| Stateful execution inside a lab VM | Yes — one persistent guest runspace (`rpc_vm_exec`); the vmrun fallback is stateless |
 | Context-handle chaining (producer → consumer) | Yes — `store_as` / `__var__` raw-object passing |
 | Auto-confirm type confusion | **No** — NDR cannot prove distinct handle *types*; verify via RE (see XactSrv case) |
 | Full rogue-RPC hosting | **No** — NtObjectManager 2.0.1 ships no server builder; `rpc_alpc_squat` covers race-capture only |
@@ -177,7 +190,7 @@ ntobjmanager-mcp/
 ## 📖 Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — engine protocol, state model, design decisions
-- [CHANGELOG.md](CHANGELOG.md) — R1–R12 decision history incl. two PS 5.1 marshaling bugs
+- [CHANGELOG.md](CHANGELOG.md) — R1–R13 decision history incl. two PS 5.1 marshaling bugs
 - [SECURITY.md](SECURITY.md) — authorized use, VM isolation, MSRC disclosure
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development invariants and test requirements
 

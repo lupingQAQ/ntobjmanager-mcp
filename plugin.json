@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "ntobjmanager-mcp",
-  "description": "Stateful Windows RPC attack-surface research for AI agents: 22 tools on NtObjectManager. Requires Windows, PowerShell 5.1 and the NtObjectManager module.",
-  "version": "1.0.0",
+  "description": "Stateful Windows RPC attack-surface research for AI agents: 24 tools on NtObjectManager. Requires Windows, PowerShell 5.1 and the NtObjectManager module.",
+  "version": "0.2.0",
   "author": { "name": "lupingQAQ", "url": "https://github.com/lupingQAQ" },
   "homepage": "https://github.com/lupingQAQ/ntobjmanager-mcp",
   "repository": { "type": "git", "url": "https://github.com/lupingQAQ/ntobjmanager-mcp" }

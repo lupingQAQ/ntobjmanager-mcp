@@ -1,4 +1,4 @@
-# Changelog（设计裁决编号史 R1–R12）
+# Changelog（设计裁决编号史 R1–R13）
 
 历史轮次的全部修复与裁决，按主题归组。编号保留可追溯性；
 复现证据见 tests/ 三套套件（smoke 17 / var 10 / audit 43）。

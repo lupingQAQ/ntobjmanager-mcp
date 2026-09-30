@@ -6,7 +6,7 @@
 ## 模块图（唯一真相源）
 
 ```
-server.py ───────────────── MCP 工具层（22 工具 + 审计日志装饰器 @tool）
+server.py ───────────────── MCP 工具层（24 工具 + 审计日志装饰器 @tool）
   │  python 侧: 输入校验 / glob 展开 / 结果聚合 / 文件产物
   ▼
 snippets.py ──────────────── PS 命令模板库（INIT/PARSE/CONNECT/CALL/…）
