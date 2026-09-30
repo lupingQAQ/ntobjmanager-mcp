@@ -649,13 +649,28 @@ def rpc_clear_cache() -> dict:
 #   {"<name>": {"vmx": "<guest.vmx>", "user": "<user>", "pass": "<pass>", "ip": "<optional>"}}
 # Optional: RPCMCP_VM_DEFAULT (default VM name), RPCMCP_VMRUN (vmrun path).
 try:
+    import local_config as _local_config
+except ImportError:
+    _local_config = None
+
+try:
     _VMS: dict[str, dict[str, str]] = json.loads(os.environ.get("RPCMCP_VMS", "") or "{}")
     if not isinstance(_VMS, dict):
         _VMS = {}
 except ValueError:
     _VMS = {}
-_DEFAULT_VM = os.environ.get("RPCMCP_VM_DEFAULT", "") or next(iter(_VMS), "")
-_VMRUN = os.environ.get("RPCMCP_VMRUN", "") or "vmrun"
+if not _VMS and _local_config is not None:
+    _VMS = getattr(_local_config, "VMS", {}) or {}
+_DEFAULT_VM = (
+    os.environ.get("RPCMCP_VM_DEFAULT", "")
+    or (getattr(_local_config, "DEFAULT_VM", "") if _local_config else "")
+    or next(iter(_VMS), "")
+)
+_VMRUN = (
+    os.environ.get("RPCMCP_VMRUN", "")
+    or (getattr(_local_config, "VMRUN", "") if _local_config else "")
+    or "vmrun"
+)
 _BRIDGE_PORT = 8765
 _BRIDGE_TOKEN = "rpcmcp-bridge"
 _vm_ip_cache: dict[str, str] = {}
@@ -847,6 +862,23 @@ def rpc_vm_start_listener(vm: str = "") -> dict:
         return {"ok": True, "vm": name, "status": status or "started"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+try:
+    import local_tools as _local_tools
+
+    class _LocalNS:
+        pass
+
+    _ns = _LocalNS()
+    _ns.tool = tool
+    _ns.run = _run
+    _ns.snippets = S
+    _ns.prefix_for = _prefix_for
+    _ns.scan_context_handles = rpc_scan_context_handles
+    _local_tools.register(_ns)
+except ImportError:
+    pass
 
 
 if __name__ == "__main__":
