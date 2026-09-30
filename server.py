@@ -19,13 +19,16 @@ this host and may crash services. Prefer an isolated VM.
 
 from __future__ import annotations
 
+import base64
 import functools
 import glob as _glob
 import json
 import os
 import re
+import subprocess
 import threading
 import time
+import urllib.request
 from typing import Any, Optional
 
 try:  # mcp 2.x renamed FastMCP -> MCPServer
@@ -633,6 +636,217 @@ def rpc_clear_cache() -> dict:
     """Drop all cached parsed servers (eviction cap is 150; connected sessions keep their
     clients and stay usable)."""
     return _run(S.CLEAR_CACHE, timeout=60)
+
+
+# ===========================================================================
+# VM bridge: execute PowerShell inside a VMware guest via a persistent
+# HTTP listener (vm_listener.ps1), so host-driven hunts can run probes in
+# the isolated VM at ~100ms/call instead of ~20s vmrun round trips.
+# ===========================================================================
+
+# VM definitions come from the environment - no lab host, path, credential or IP
+# is baked into the source. Set RPCMCP_VMS to a JSON object shaped like:
+#   {"<name>": {"vmx": "<guest.vmx>", "user": "<user>", "pass": "<pass>", "ip": "<optional>"}}
+# Optional: RPCMCP_VM_DEFAULT (default VM name), RPCMCP_VMRUN (vmrun path).
+try:
+    _VMS: dict[str, dict[str, str]] = json.loads(os.environ.get("RPCMCP_VMS", "") or "{}")
+    if not isinstance(_VMS, dict):
+        _VMS = {}
+except ValueError:
+    _VMS = {}
+_DEFAULT_VM = os.environ.get("RPCMCP_VM_DEFAULT", "") or next(iter(_VMS), "")
+_VMRUN = os.environ.get("RPCMCP_VMRUN", "") or "vmrun"
+_BRIDGE_PORT = 8765
+_BRIDGE_TOKEN = "rpcmcp-bridge"
+_vm_ip_cache: dict[str, str] = {}
+
+
+def _vm_ip(vm: str) -> Optional[str]:
+    if vm in _vm_ip_cache:
+        return _vm_ip_cache[vm]
+    info = _VMS.get(vm, {})
+    if info.get("ip"):
+        _vm_ip_cache[vm] = info["ip"]
+        return info["ip"]
+    vmx = info.get("vmx")
+    if not vmx:
+        return None
+    try:
+        out = subprocess.run(
+            [_VMRUN, "-T", "ws", "getGuestIPAddress", vmx],
+            capture_output=True, text=True, timeout=60,
+        )
+        ip = out.stdout.strip()
+        if ip:
+            _vm_ip_cache[vm] = ip
+            return ip
+    except Exception:
+        pass
+    return None
+
+
+def _vm_post(ps: str, timeout: float = 180.0, vm: str = _DEFAULT_VM) -> dict:
+    ip = _vm_ip(vm)
+    if ip:
+        try:
+            body = json.dumps({"ps": ps}).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://{ip}:{_BRIDGE_PORT}/rpcmcp/",
+                data=body,
+                headers={"Content-Type": "application/json", "X-Token": _BRIDGE_TOKEN},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            out = payload.get("output", "")
+            try:
+                val = json.loads(out) if out else None
+            except ValueError:
+                val = out
+            return {
+                "ok": True, "vm": vm, "via": "http", "result": val,
+                "stateful": True,
+                "note": "persistent guest engine: variables / connected RPC clients survive across rpc_vm_exec calls",
+            }
+        except Exception:
+            pass
+    return _vm_post_via_vmrun(ps, timeout, vm)
+
+
+_VM_RUN_LOCK = threading.Lock()
+_VM_TASK_SEQ = 0
+
+
+def _vm_post_via_vmrun(ps: str, timeout: float = 180.0, vm: str = _DEFAULT_VM) -> dict:
+    """Fallback bridge transport: file-copy the script in via vmrun, run, copy result out.
+    No guest networking required (uses the VMware Tools channel). ~6-8s per call."""
+    global _VM_TASK_SEQ
+    info = _VMS.get(vm, {})
+    vmx = info.get("vmx")
+    auth = ["-gu", info.get("user", "Administrator"), "-gp", info.get("pass", "")]
+    if not vmx:
+        return {"ok": False, "error": f"unknown vm {vm!r} (known: {sorted(_VMS)})"}
+    with _VM_RUN_LOCK:
+        _VM_TASK_SEQ += 1
+        task = f"task_{int(time.time())}_{_VM_TASK_SEQ}"
+        here = os.path.dirname(os.path.abspath(__file__))
+        local_ps = os.path.join(here, "output", f"vm_{task}.ps1")
+        local_out = os.path.join(here, "output", f"vm_{task}.out")
+        os.makedirs(os.path.dirname(local_ps), exist_ok=True)
+        wrapper = (
+            "Import-Module NtObjectManager -ErrorAction SilentlyContinue\n"
+            "$userPs = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"
+            + base64.b64encode(ps.encode("utf-8")).decode("ascii")
+            + "'))\n"
+            "try {\n"
+            "$r = Invoke-Expression $userPs\n"
+            "} catch { $r = '__ERROR__ ' + $_.Exception.Message }\n"
+            "if ($null -ne $r -and \"$r\" -ne '') { $r | Out-File C:\\rpcmcp\\last.out -Encoding utf8 } "
+            "else { 'null' | Out-File C:\\rpcmcp\\last.out -Encoding utf8 }\n"
+        )
+        with open(local_ps, "w", encoding="utf-8-sig") as fh:
+            fh.write(wrapper)
+        try:
+            r1 = subprocess.run([_VMRUN, "-T", "ws", *auth, "CopyFileFromHostToGuest", vmx, local_ps, rf"C:\rpcmcp\run.ps1"],
+                                capture_output=True, timeout=240)
+            if r1.returncode != 0:
+                return {"ok": False, "error": f"copy-in failed: {r1.stderr.decode(errors='replace')[:200]}"}
+            r2 = subprocess.run([_VMRUN, "-T", "ws", *auth, "runProgramInGuest", vmx,
+                                 r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                                 "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"C:\rpcmcp\run.ps1"],
+                                capture_output=True, timeout=max(120, timeout))
+            if r2.returncode != 0 and b"Error" in r2.stderr:
+                return {"ok": False, "error": f"guest run failed: {r2.stderr.decode(errors='replace')[:200]}"}
+            subprocess.run([_VMRUN, "-T", "ws", *auth, "CopyFileFromGuestToHost", vmx, r"C:\rpcmcp\last.out", local_out],
+                           capture_output=True, timeout=240)
+            if not os.path.isfile(local_out):
+                return {"ok": False, "error": "copy-out failed (output missing)"}
+            out = open(local_out, encoding="utf-8-sig", errors="replace").read().strip()
+            if out.startswith("__ERROR__"):
+                return {"ok": False, "vm": vm, "via": "vmrun", "error": out[len("__ERROR__"):].strip()}
+            try:
+                val = json.loads(out)
+            except ValueError:
+                val = out
+            return {
+                "ok": True, "vm": vm, "via": "vmrun", "result": val,
+                "stateful": False,
+                "hint": "vmrun fallback spawns a fresh guest shell per call - state does NOT persist across calls. "
+                        "Run rpc_vm_start_listener (needs admin in the guest) to use the persistent HTTP engine.",
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"vmrun bridge failed: {e}"}
+
+
+@tool
+def rpc_vm_exec(ps: str, timeout: int = 180, vm: str = "") -> dict:
+    """Run arbitrary PowerShell INSIDE a lab VM and return its output. The target VM
+    is chosen by name (see RPCMCP_VMS / RPCMCP_VM_DEFAULT). Write the PS to emit JSON
+    (ConvertTo-Json) for structured results.
+
+    Stateful: when the HTTP bridge is live (rpc_vm_start_listener) the guest keeps ONE
+    persistent runspace, so variables / connected RPC clients survive across calls.
+    The vmrun file-copy fallback is stateless (fresh guest shell per call). The
+    response carries a `stateful` flag so you can tell which transport was used."""
+    return _vm_post(ps, timeout=min(max(timeout, 5), 900), vm=vm or _DEFAULT_VM)
+
+
+@tool
+def rpc_vm_start_listener(vm: str = "") -> dict:
+    """Deploy/start the PowerShell HTTP bridge listener inside a VM (idempotent):
+    copies vm_listener.ps1 via vmrun, adds URLACL + firewall rule, starts listener.
+    The listener keeps ONE persistent guest runspace, so rpc_vm_exec state (variables,
+    connected RPC clients) survives across calls. If an OLDER listener is already
+    running it is NOT replaced - stop it first (rpc_vm_exec a Stop-Process over
+    CommandLine matching *vm_listener.ps1*), then call this again to redeploy."""
+    name = vm or _DEFAULT_VM
+    info = _VMS.get(name)
+    if not info:
+        return {"ok": False, "error": f"unknown vm {name!r} (known: {sorted(_VMS)})"}
+    vmx = info["vmx"]
+    here = os.path.dirname(os.path.abspath(__file__))
+    listener = os.path.join(here, "vm_listener.ps1")
+    if not os.path.isfile(listener):
+        return {"ok": False, "error": f"vm_listener.ps1 missing next to server.py: {listener}"}
+    auth = ["-gu", info["user"], "-gp", info["pass"]]
+    powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    bootstrap = (
+        "$running = @(Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | "
+        "Where-Object { $_.CommandLine -like '*vm_listener.ps1*' })\r\n"
+        "if (-not (Test-Path C:\\rpcmcp)) { New-Item -ItemType Directory C:\\rpcmcp -Force | Out-Null }\r\n"
+        "netsh http add urlacl url=http://+:8765/rpcmcp/ user=Everyone 2>$null | Out-Null\r\n"
+        "netsh advfirewall firewall delete rule name=RpcMcpBridge 2>$null | Out-Null\r\n"
+        "netsh advfirewall firewall add rule name=RpcMcpBridge dir=in action=allow protocol=TCP localport=8765 | Out-Null\r\n"
+        "if ($running.Count) { $status = 'already-running' } else {\r\n"
+        "  Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\\rpcmcp\\vm_listener.ps1' -WindowStyle Hidden\r\n"
+        "  $status = 'started'\r\n"
+        "}\r\n"
+        "$status | Out-File C:\\rpcmcp\\boot.status -Encoding ascii\r\n"
+    )
+    out_dir = os.path.join(here, "output")
+    os.makedirs(out_dir, exist_ok=True)
+    local_boot = os.path.join(out_dir, "vm_bootstrap.ps1")
+    local_status = os.path.join(out_dir, "vm_boot.status")
+    with open(local_boot, "w", encoding="utf-8-sig") as fh:
+        fh.write(bootstrap)
+    try:
+        for local_path, guest_path in ((listener, r"C:\rpcmcp\vm_listener.ps1"), (local_boot, r"C:\rpcmcp\bootstrap.ps1")):
+            cp = subprocess.run([_VMRUN, "-T", "ws", *auth, "CopyFileFromHostToGuest", vmx, local_path, guest_path],
+                                capture_output=True, timeout=300)
+            if cp.returncode != 0:
+                return {"ok": False, "error": f"copy-in failed for {os.path.basename(local_path)}: {cp.stderr.decode(errors='replace')[:200]}"}
+        subprocess.run([_VMRUN, "-T", "ws", *auth, "runProgramInGuest", vmx,
+                        powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"C:\rpcmcp\bootstrap.ps1"],
+                       capture_output=True, timeout=300)
+        subprocess.run([_VMRUN, "-T", "ws", *auth, "CopyFileFromGuestToHost", vmx, r"C:\rpcmcp\boot.status", local_status],
+                       capture_output=True, timeout=300)
+        status = ""
+        if os.path.isfile(local_status):
+            with open(local_status, encoding="utf-8-sig", errors="replace") as fh:
+                status = fh.read().strip()
+        return {"ok": True, "vm": name, "status": status or "started"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 if __name__ == "__main__":
